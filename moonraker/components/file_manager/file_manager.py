@@ -1523,8 +1523,8 @@ class MetadataStorage:
         # Escape single quotes in the file name so that it may be
         # properly loaded
         filename = filename.replace("\"", "\\\"")
-        cmd = " ".join([sys.executable, METADATA_SCRIPT, "-p",
-                        self.gc_path, "-f", f"\"{filename}\""])
+        cmd = " ".join([sys.executable, METADATA_SCRIPT, "--enable-cancellation",
+                        "-p", self.gc_path, "-f", f"\"{filename}\""])
         timeout = 10.
         if ufp_path is not None and os.path.isfile(ufp_path):
             timeout = 300.
