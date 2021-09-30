@@ -39,6 +39,7 @@ install_packages()
     PKGLIST="python3-virtualenv python3-dev libopenjp2-7 python3-libgpiod"
     PKGLIST="${PKGLIST} curl libcurl4-openssl-dev libssl-dev liblmdb0"
     PKGLIST="${PKGLIST} libsodium-dev zlib1g-dev"
+    PKGLIST="${PKGLIST} libgeos-c1v5"
 
     # Update system package info
     report_status "Running apt-get update..."

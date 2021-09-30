@@ -15,6 +15,8 @@ import asyncio
 from inotify_simple import INotify
 from inotify_simple import flags as iFlags
 
+from preprocess_cancellation import process_file_for_cancellation
+
 # Annotation imports
 from typing import (
     TYPE_CHECKING,
@@ -1523,8 +1525,8 @@ class MetadataStorage:
         # Escape single quotes in the file name so that it may be
         # properly loaded
         filename = filename.replace("\"", "\\\"")
-        cmd = " ".join([sys.executable, METADATA_SCRIPT, "--enable-cancellation",
-                        "-p", self.gc_path, "-f", f"\"{filename}\""])
+        cmd = " ".join([sys.executable, METADATA_SCRIPT, "-p",
+                        self.gc_path, "-f", f"\"{filename}\""])
         timeout = 10.
         if ufp_path is not None and os.path.isfile(ufp_path):
             timeout = 300.
@@ -1544,6 +1546,10 @@ class MetadataStorage:
             # This indicates an error, do not add metadata for this
             raise self.server.error("Unable to extract metadata")
         metadata.update({'print_start_time': None, 'job_id': None})
+        if not metadata['supports_cancellation']:
+            logging.debug(f'Processing {path} for cancellation')
+            if process_file_for_cancellation(os.path.join(self.gc_path, path)):
+                metadata['supports_cancellation'] = True
         self.mddb[path] = dict(metadata)
         metadata['filename'] = path
 

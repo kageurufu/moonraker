@@ -18,8 +18,6 @@ import zipfile
 import shutil
 from PIL import Image
 
-from preprocess_cancellation import process_file_for_cancellation
-
 # Annotation imports
 from typing import (
     TYPE_CHECKING,
@@ -158,6 +156,9 @@ class BaseSlicer(object):
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
         return None
+
+    def parse_supports_cancellation(self) -> Optional[bool]:
+        return 'DEFINE_OBJECT' in self.header_data
 
 class UnknownSlicer(BaseSlicer):
     def check_identity(self, data: str) -> Optional[Dict[str, str]]:
@@ -642,7 +643,7 @@ SUPPORTED_DATA = [
     'layer_height', 'first_layer_height', 'object_height',
     'filament_total', 'filament_weight_total', 'estimated_time',
     'thumbnails', 'first_layer_bed_temp', 'first_layer_extr_temp',
-    'gcode_start_byte', 'gcode_end_byte']
+    'gcode_start_byte', 'gcode_end_byte', 'supports_cancellation']
 
 def extract_metadata(file_path: str) -> Dict[str, Any]:
     metadata: Dict[str, Any] = {}
@@ -711,7 +712,7 @@ def extract_ufp(ufp_path: str, dest_path: str) -> None:
     except Exception:
         log_to_stderr(f"Error removing ufp file: {ufp_path}")
 
-def main(path: str, filename: str, ufp: Optional[str], enable_cancellation: bool) -> None:
+def main(path: str, filename: str, ufp: Optional[str]) -> None:
     file_path = os.path.join(path, filename)
     if ufp is not None:
         extract_ufp(ufp, file_path)
@@ -719,8 +720,6 @@ def main(path: str, filename: str, ufp: Optional[str], enable_cancellation: bool
     if not os.path.isfile(file_path):
         log_to_stderr(f"File Not Found: {file_path}")
         sys.exit(-1)
-    if enable_cancellation:
-        process_file_for_cancellation(file_path)
     try:
         metadata = extract_metadata(file_path)
     except Exception:
@@ -753,9 +752,5 @@ if __name__ == "__main__":
         "-u", "--ufp", metavar="<ufp file>", default=None,
         help="optional path of ufp file to extract"
     )
-    parser.add_argument(
-        "--enable-cancellation", action="store_true",
-        help="Preprocess gcode for object cancellation"
-    )
     args = parser.parse_args()
-    main(args.path, args.filename, args.ufp, args.enable_cancellation)
+    main(args.path, args.filename, args.ufp)
