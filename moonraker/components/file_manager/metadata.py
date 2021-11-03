@@ -713,7 +713,7 @@ def extract_metadata(file_path: str) -> Dict[str, Any]:
                 metadata[key] = result
     return metadata
 
-def extract_ufp(ufp_path: str, dest_path: str) -> None:
+def extract_ufp(ufp_path: str, dest_path: str, intermed_dest_path: str) -> None:
     if not os.path.isfile(ufp_path):
         log_to_stderr(f"UFP file Not Found: {ufp_path}")
         sys.exit(-1)
@@ -730,7 +730,7 @@ def extract_ufp(ufp_path: str, dest_path: str) -> None:
                 if UFP_THUMB_PATH in zf.namelist():
                     tmp_thumb_path = zf.extract(
                         UFP_THUMB_PATH, path=tmp_dir_name)
-            shutil.move(tmp_model_path, dest_path)
+            shutil.move(tmp_model_path, intermed_dest_path)
             if tmp_thumb_path:
                 if not os.path.exists(dest_thumb_dir):
                     os.mkdir(dest_thumb_dir)
@@ -746,7 +746,8 @@ def extract_ufp(ufp_path: str, dest_path: str) -> None:
 def main(path: str, filename: str, ufp: Optional[str]) -> None:
     file_path = os.path.join(path, filename)
     if ufp is not None:
-        extract_ufp(ufp, file_path)
+        log_to_stderr(f"Not extracting UFP files here: {file_path}")
+        sys.exit(-1)
     metadata: Dict[str, Any] = {}
     if not os.path.isfile(file_path):
         log_to_stderr(f"File Not Found: {file_path}")

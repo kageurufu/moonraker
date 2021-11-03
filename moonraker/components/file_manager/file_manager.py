@@ -12,8 +12,11 @@ import logging
 import json
 import tempfile
 import asyncio
+import concurrent
 from inotify_simple import INotify
 from inotify_simple import flags as iFlags
+from .metadata import extract_ufp
+from preprocess_cancellation import preprocessor
 
 # Annotation imports
 from typing import (
@@ -501,6 +504,64 @@ class FileManager:
             'ext': f_ext
         }
 
+
+    def _proc_for_can (self, path_src, path_dest) -> None:
+        logging.info("START: _proc_for_can")
+        with open(path_src, "r") as fin:
+            with open( path_dest, "w") as fout:
+                res = preprocessor(fin, fout)
+        logging.info("END: _proc_for_can")
+
+    async def _finish_gcode_upload_async(self,
+                                   upload_info: Dict[str, Any],
+                                   start_print: bool
+                                   ) -> None:
+        logging.info("_finish_gcode_upload_asycn")
+        final_dest_path = upload_info['dest_path']
+        logging.info(final_dest_path)
+        self.notify_sync_lock = NotifySyncLock(final_dest_path)
+        pre_proc_file = upload_info['tmp_file_path']
+        logging.info(pre_proc_file)
+        os.makedirs(os.path.dirname(final_dest_path), exist_ok=True)
+        if upload_info['unzip_ufp']:
+            ufp_path = pre_proc_file
+            ufp_gc_temp =  os.path.join(
+                tempfile.gettempdir(),
+                os.path.basename(final_dest_path)[0])
+            extract_ufp(ufp_path, final_dest_path, ufp_gc_temp)
+            pre_proc_file = ufp_gc_temp
+
+        # intermed_dest_path =  os.path.join(
+        #     os.path.dirname(final_dest_path),
+        #     "." + os.path.basename(final_dest_path)[0])
+        intermed_dest_path = pre_proc_file + ".pp"
+        logging.info("processing for cancellation")
+        logging.info(intermed_dest_path)
+
+        loop = asyncio.get_running_loop()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            await loop.run_in_executor(pool, self._proc_for_can, pre_proc_file, intermed_dest_path)
+
+        logging.info("Move to final dest")
+        shutil.move(intermed_dest_path, final_dest_path)
+        logging.info("path info")
+        finfo = self.get_path_info(upload_info['dest_path'],
+                                   upload_info['root'])
+        logging.info("parse metadata")
+        await self.gcode_metadata.parse_metadata(
+            upload_info['filename'] , finfo).wait()
+        if start_print:
+            # Make a Klippy Request to "Start Print"
+            kapis: APIComp = self.server.lookup_component('klippy_apis')
+            try:
+                await kapis.start_print(upload_info['filename'])
+            except self.server.error:
+                # Attempt to start print failed
+                start_print = False
+        await self.notify_sync_lock.wait(300.)
+        logging.info("done with gcode upload")
+        self.notify_sync_lock = None
+
     async def _finish_gcode_upload(self,
                                    upload_info: Dict[str, Any]
                                    ) -> Dict[str, Any]:
@@ -521,20 +582,11 @@ class FileManager:
                 start_print = False
         # Don't start if another print is currently in progress
         start_print = start_print and not print_ongoing
-        self.notify_sync_lock = NotifySyncLock(upload_info['dest_path'])
-        finfo = await self._process_uploaded_file(upload_info)
-        await self.gcode_metadata.parse_metadata(
-            upload_info['filename'], finfo).wait()
-        if start_print:
-            # Make a Klippy Request to "Start Print"
-            kapis: APIComp = self.server.lookup_component('klippy_apis')
-            try:
-                await kapis.start_print(upload_info['filename'])
-            except self.server.error:
-                # Attempt to start print failed
-                start_print = False
-        await self.notify_sync_lock.wait(300.)
-        self.notify_sync_lock = None
+
+        loop = asyncio.get_running_loop()
+        loop.create_task(self._finish_gcode_upload_async(upload_info, start_print))
+
+        logging.info("Returning from POST Call")
         return {
             'item': {
                 'path': upload_info['filename'],
