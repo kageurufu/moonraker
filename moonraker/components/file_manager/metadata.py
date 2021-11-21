@@ -13,9 +13,6 @@ import os
 import sys
 import base64
 import traceback
-import tempfile
-import zipfile
-import shutil
 from PIL import Image
 
 # Annotation imports
@@ -29,9 +26,6 @@ from typing import (
 )
 if TYPE_CHECKING:
     pass
-
-UFP_MODEL_PATH = "/3D/model.gcode"
-UFP_THUMB_PATH = "/Metadata/thumbnail.png"
 
 def log_to_stderr(msg: str) -> None:
     sys.stderr.write(f"{msg}\n")
@@ -156,6 +150,12 @@ class BaseSlicer(object):
 
     def parse_thumbnails(self) -> Optional[List[Dict[str, Any]]]:
         return None
+
+    def parse_supports_cancellation(self) -> Optional[bool]:
+        return 'DEFINE_OBJECT' in self.header_data
+
+    def parse_object_count(self) -> Optional[bool]:
+        return self.header_data.count('DEFINE_OBJECT')
 
 class UnknownSlicer(BaseSlicer):
     def check_identity(self, data: str) -> Optional[Dict[str, str]]:
@@ -674,7 +674,8 @@ SUPPORTED_DATA = [
     'layer_height', 'first_layer_height', 'object_height',
     'filament_total', 'filament_weight_total', 'estimated_time',
     'thumbnails', 'first_layer_bed_temp', 'first_layer_extr_temp',
-    'gcode_start_byte', 'gcode_end_byte']
+    'gcode_start_byte', 'gcode_end_byte', 'supports_cancellation',
+    'object_count']
 
 def extract_metadata(file_path: str) -> Dict[str, Any]:
     metadata: Dict[str, Any] = {}
@@ -713,44 +714,9 @@ def extract_metadata(file_path: str) -> Dict[str, Any]:
                 metadata[key] = result
     return metadata
 
-def extract_ufp(ufp_path: str, dest_path: str) -> None:
-    if not os.path.isfile(ufp_path):
-        log_to_stderr(f"UFP file Not Found: {ufp_path}")
-        sys.exit(-1)
-    thumb_name = os.path.splitext(
-        os.path.basename(dest_path))[0] + ".png"
-    dest_thumb_dir = os.path.join(os.path.dirname(dest_path), ".thumbs")
-    dest_thumb_path = os.path.join(dest_thumb_dir, thumb_name)
-    try:
-        with tempfile.TemporaryDirectory() as tmp_dir_name:
-            tmp_thumb_path = ""
-            with zipfile.ZipFile(ufp_path) as zf:
-                tmp_model_path = zf.extract(
-                    UFP_MODEL_PATH, path=tmp_dir_name)
-                if UFP_THUMB_PATH in zf.namelist():
-                    tmp_thumb_path = zf.extract(
-                        UFP_THUMB_PATH, path=tmp_dir_name)
-            shutil.move(tmp_model_path, dest_path)
-            if tmp_thumb_path:
-                if not os.path.exists(dest_thumb_dir):
-                    os.mkdir(dest_thumb_dir)
-                shutil.move(tmp_thumb_path, dest_thumb_path)
-    except Exception:
-        log_to_stderr(traceback.format_exc())
-        sys.exit(-1)
-    try:
-        os.remove(ufp_path)
-    except Exception:
-        log_to_stderr(f"Error removing ufp file: {ufp_path}")
-
-def main(path: str, filename: str, ufp: Optional[str]) -> None:
+def main(path: str, filename: str) -> None:
     file_path = os.path.join(path, filename)
-    if ufp is not None:
-        extract_ufp(ufp, file_path)
     metadata: Dict[str, Any] = {}
-    if not os.path.isfile(file_path):
-        log_to_stderr(f"File Not Found: {file_path}")
-        sys.exit(-1)
     try:
         metadata = extract_metadata(file_path)
     except Exception:
@@ -766,7 +732,6 @@ def main(path: str, filename: str, ufp: Optional[str]) -> None:
             continue
         data = data[ret:]
 
-
 if __name__ == "__main__":
     # Parse start arguments
     parser = argparse.ArgumentParser(
@@ -779,9 +744,5 @@ if __name__ == "__main__":
         metavar='<path>',
         help="optional absolute path for file"
     )
-    parser.add_argument(
-        "-u", "--ufp", metavar="<ufp file>", default=None,
-        help="optional path of ufp file to extract"
-    )
     args = parser.parse_args()
-    main(args.path, args.filename, args.ufp)
+    main(args.path, args.filename)

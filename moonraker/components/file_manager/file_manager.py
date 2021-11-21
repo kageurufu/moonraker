@@ -12,8 +12,17 @@ import logging
 import json
 import tempfile
 import asyncio
+import concurrent
+import zipfile
 from inotify_simple import INotify
 from inotify_simple import flags as iFlags
+
+has_preprocess_cancellation = False
+try:
+    from preprocess_cancellation import preprocessor
+    has_preprocess_cancellation = True
+except ImportError:
+    logging.exception("Unable to load the preprocess_cancellation module.")
 
 # Annotation imports
 from typing import (
@@ -51,6 +60,9 @@ METADATA_SCRIPT = os.path.abspath(os.path.join(
 WATCH_FLAGS = iFlags.CREATE | iFlags.DELETE | iFlags.MODIFY \
     | iFlags.MOVED_TO | iFlags.MOVED_FROM | iFlags.ONLYDIR \
     | iFlags.CLOSE_WRITE
+
+UFP_MODEL_PATH = "/3D/model.gcode"
+UFP_THUMB_PATH = "/Metadata/thumbnail.png"
 
 class FileManager:
     def __init__(self, config: ConfigHelper) -> None:
@@ -505,6 +517,135 @@ class FileManager:
             'ext': f_ext
         }
 
+    def _extract_ufp(self, ufp_path: str, dest_path: str, intermed_dest_path: str) -> None:
+        if not os.path.isfile(ufp_path):
+            logging.error(f"UFP file Not Found: {ufp_path}")
+        thumb_name = os.path.splitext(
+            os.path.basename(dest_path))[0] + ".png"
+        dest_thumb_dir = os.path.join(os.path.dirname(dest_path), ".thumbs")
+        dest_thumb_path = os.path.join(dest_thumb_dir, thumb_name)
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir_name:
+                logging.error(f"Extracting UFP file: {ufp_path}")
+                tmp_thumb_path = ""
+                with zipfile.ZipFile(ufp_path) as zf:
+                    tmp_model_path = zf.extract(
+                        UFP_MODEL_PATH, path=tmp_dir_name)
+                    if UFP_THUMB_PATH in zf.namelist():
+                        tmp_thumb_path = zf.extract(
+                            UFP_THUMB_PATH, path=tmp_dir_name)
+                logging.info(f"Moving extracted gcode from {tmp_model_path} to {intermed_dest_path}")
+                shutil.move(tmp_model_path, intermed_dest_path)
+                if tmp_thumb_path:
+                    if not os.path.exists(dest_thumb_dir):
+                        os.mkdir(dest_thumb_dir)
+                    logging.info(f"Moving extracted thumbnails from {tmp_thumb_path} to {dest_thumb_path}")
+                    shutil.move(tmp_thumb_path, dest_thumb_path)
+            return True
+        except Exception:
+            logging.exception(f"Error extracting ufp file: {ufp_path}")
+            try:
+                os.remove(intermed_dest_path)
+            except Exception:
+                # Depending on when the initial exception happened, the extracted
+                # gcode file may not have been created.
+                # Therefore, we'll pass here and not distract from the initial
+                # exception with a low value log message.
+                pass
+            try:
+                os.remove(dest_thumb_path)
+            except Exception:
+                # See the comment above
+                pass
+            return False
+        finally:
+            try:
+                os.remove(ufp_path)
+            except Exception:
+                logging.exception(f"Error removing ufp file: {ufp_path}")
+
+    def _process_for_cancellation (self, path_src, path_dest) -> None:
+        logging.info("START: _proc_for_can")
+        with open(path_src, "r") as fin:
+            with open( path_dest, "w") as fout:
+                preprocessor(fin, fout)
+        logging.info("END: _proc_for_can")
+
+    async def _finish_gcode_upload_worker(self, upload_info: Dict[str, Any]) -> None:
+
+        logging.info("Starting _finish_gcode_upload_async")
+        loop = asyncio.get_running_loop()
+        try:
+            kapis: APIComp = self.server.lookup_component('klippy_apis')
+            kobjects = await kapis.get_object_list(default=None)
+            if kobjects is not None:
+                exclude_object_enabled = "exclude_object" in kobjects
+        except Exception:
+            # After logging, continue processing with the assumption that exclude_object
+            # is not enabled.
+            logging.exception("Error querering klipper for exclude_object status")
+
+        final_dest_path = upload_info['dest_path']
+        logging.info(final_dest_path)
+        pre_process_file = upload_info['tmp_file_path']
+        logging.info(pre_process_file)
+        # Does this need to mimic the way directories are created in _process_uploaded_file?
+        os.makedirs(os.path.dirname(final_dest_path), exist_ok=True)
+
+        if upload_info['unzip_ufp']:
+            ufp_path = pre_process_file
+            ufp_gc_temp =  os.path.join(
+                tempfile.gettempdir(),
+                os.path.basename(final_dest_path)[0])
+            pre_process_file = ufp_gc_temp
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                if not await loop.run_in_executor(pool, self._extract_ufp, ufp_path, final_dest_path, ufp_gc_temp):
+                    logging.error(f"Unable to extract UFP file for processing: {ufp_path}")
+                    return
+
+        intermediate_dest_path = pre_process_file
+        if exclude_object_enabled and not has_preprocess_cancellation:
+            logging.warning("Unalbe to process file for cancellation because the preprocessor package is not installed.")
+
+        if exclude_object_enabled and has_preprocess_cancellation:
+            intermediate_dest_path = pre_process_file + ".pp"
+            logging.info("processing for cancellation")
+            logging.info(intermediate_dest_path)
+
+            try:
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    await loop.run_in_executor(pool, self._process_for_cancellation, pre_process_file, intermediate_dest_path)
+            except Exception:
+                logging.exception(f"Error processing file for cancellation: {pre_process_file}")
+                try:
+                    os.remove(intermediate_dest_path)
+                except Exception:
+                    # Not concerned about a failure here since the file may not exist
+                    pass
+                return
+            finally:
+                try:
+                    os.remove(pre_process_file)
+                except Exception:
+                    logging.exception(f"Error removing initial gcode file: {pre_process_file}")
+
+        try:
+            shutil.move(intermediate_dest_path, final_dest_path)
+        except Exception:
+            logging.exception(f"Error moving processed file to the final destination: {final_dest_path}")
+            try:
+                os.remove(intermediate_dest_path)
+            except Exception:
+                logging.exception(f"While handling previous exception, the intermediate file couldn't be deleted: {intermediate_dest_path}")
+            return
+
+        finfo = self.get_path_info(final_dest_path, upload_info['root'])
+        await self.gcode_metadata.parse_metadata(
+            upload_info['filename'] , finfo).wait()
+
+
+        logging.info("done with gcode processing")
+
     async def _finish_gcode_upload(self,
                                    upload_info: Dict[str, Any]
                                    ) -> Dict[str, Any]:
@@ -517,10 +658,11 @@ class FileManager:
             if e.status_code == 403:
                 raise self.server.error(
                     "File is loaded, upload not permitted", 403)
-        self.notify_sync_lock = NotifySyncLock(upload_info['dest_path'])
-        finfo = await self._process_uploaded_file(upload_info)
-        await self.gcode_metadata.parse_metadata(
-            upload_info['filename'], finfo).wait()
+        self.notify_sync_lock = NotifySyncLock(upload_info['dest_path]'])
+
+        logging.info("Awaiting pre-processing")
+        await self._finish_gcode_upload_worker(upload_info)
+
         started: bool = False
         queued: bool = False
         if upload_info['start_print']:
@@ -543,6 +685,7 @@ class FileManager:
         if queued:
             self.server.send_event("file_manager:upload_queued",
                                    upload_info['filename'])
+        logging.info("Returning from POST Call")
         return {
             'item': {
                 'path': upload_info['filename'],
@@ -583,15 +726,10 @@ class FileManager:
                     os.mkdir(cur_path)
                     # wait for inotify to create a watch before proceeding
                     await asyncio.sleep(.1)
-            if upload_info['unzip_ufp']:
-                tmp_path = upload_info['tmp_file_path']
-                finfo = self.get_path_info(tmp_path, upload_info['root'])
-                finfo['ufp_path'] = tmp_path
-            else:
-                shutil.move(upload_info['tmp_file_path'],
-                            upload_info['dest_path'])
-                finfo = self.get_path_info(upload_info['dest_path'],
-                                           upload_info['root'])
+            shutil.move(upload_info['tmp_file_path'],
+                        upload_info['dest_path'])
+            finfo = self.get_path_info(upload_info['dest_path'],
+                                        upload_info['root'])
         except Exception:
             logging.exception("Upload Write Error")
             raise self.server.error("Unable to save file", 500)
@@ -1545,10 +1683,6 @@ class MetadataStorage:
         cmd = " ".join([sys.executable, METADATA_SCRIPT, "-p",
                         self.gc_path, "-f", f"\"{filename}\""])
         timeout = 10.
-        if ufp_path is not None and os.path.isfile(ufp_path):
-            timeout = 300.
-            ufp_path.replace("\"", "\\\"")
-            cmd += f" -u \"{ufp_path}\""
         shell_cmd: SCMDComp = self.server.lookup_component('shell_command')
         scmd = shell_cmd.build_shell_command(cmd, log_stderr=True)
         result = await scmd.run_with_response(timeout=timeout)
